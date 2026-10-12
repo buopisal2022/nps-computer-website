@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('node:path');
+const crypto = require('node:crypto');
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -67,6 +68,93 @@ if (pool && sessionSecret) {
 }
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false });
+const telegramStartLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false });
+function isValidTelegramSecret(value) {
+  const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (!expected || typeof value !== 'string') return false;
+  const actualBuffer = Buffer.from(value);
+  const expectedBuffer = Buffer.from(expected);
+  return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+}
+app.post('/api/telegram/connect/start', telegramStartLimiter, async (req, res) => {
+  const username = (process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, '');
+  if (!pool || !username || !/^[A-Za-z0-9_]{5,32}$/.test(username)) {
+    return res.status(503).json({ error: 'Telegram bot is not configured yet.' });
+  }
+  try {
+    await pool.query('DELETE FROM telegram_chat_id_flows WHERE expires_at < NOW()');
+    const state = crypto.randomBytes(24).toString('base64url');
+    await pool.query(
+      "INSERT INTO telegram_chat_id_flows (state, expires_at) VALUES ($1, NOW() + INTERVAL '10 minutes')",
+      [state]
+    );
+    return res.json({ url: `https://t.me/${username}?start=${state}`, state });
+  } catch (error) {
+    console.error('Could not start Telegram chat ID flow:', error.message);
+    return res.status(503).json({ error: 'មិនអាចចាប់ផ្ដើម Telegram បានទេ។' });
+  }
+});
+app.get('/api/telegram/connect/status', async (req, res) => {
+  const state = req.query.state;
+  if (typeof state !== 'string' || !/^[A-Za-z0-9_-]{30,40}$/.test(state)) {
+    return res.status(400).json({ error: 'Invalid connection request.' });
+  }
+  try {
+    const result = await pool.query(
+      'SELECT chat_id, expires_at > NOW() AS active FROM telegram_chat_id_flows WHERE state = $1',
+      [state]
+    );
+    const flow = result.rows[0];
+    if (!flow || !flow.active) {
+      await pool.query('DELETE FROM telegram_chat_id_flows WHERE state = $1', [state]);
+      return res.status(410).json({ error: 'Telegram connection expired. Please try again.' });
+    }
+    if (!flow.chat_id) return res.json({ status: 'pending' });
+    await pool.query('DELETE FROM telegram_chat_id_flows WHERE state = $1', [state]);
+    return res.json({ status: 'connected', chatId: String(flow.chat_id) });
+  } catch (error) {
+    console.error('Could not check Telegram chat ID flow:', error.message);
+    return res.status(503).json({ error: 'មិនអាចពិនិត្យ Telegram បានទេ។' });
+  }
+});
+app.post('/api/telegram/webhook', async (req, res) => {
+  if (!isValidTelegramSecret(req.get('x-telegram-bot-api-secret-token'))) {
+    return res.sendStatus(401);
+  }
+  const message = req.body && req.body.message;
+  const match = message && message.chat && message.chat.type === 'private' &&
+    typeof message.text === 'string' &&
+    message.text.match(/^\/start(?:@\\w+)?\\s+([A-Za-z0-9_-]{30,40})(?:\\s|$)/);
+  if (match) {
+    try {
+      await pool.query(
+        'UPDATE telegram_chat_id_flows SET chat_id = $1 WHERE state = $2 AND expires_at > NOW() AND chat_id IS NULL',
+        [String(message.chat.id), match[1]]
+      );
+    } catch (error) {
+      console.error('Could not save Telegram chat ID flow:', error.message);
+      return res.sendStatus(500);
+    }
+  }
+  return res.json({ ok: true });
+});
+async function configureTelegramWebhook() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (!token || !secret) return;
+  try {
+    const base = process.env.RENDER_EXTERNAL_URL || 'https://nps-computer-auth.onrender.com';
+    const response = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: `${base}/api/telegram/webhook`, secret_token: secret, allowed_updates: ['message'] }),
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!response.ok) console.error('Telegram webhook setup failed with status', response.status);
+  } catch {
+    console.error('Telegram webhook setup could not be completed.');
+  }
+}
 function normalizePhone(value) {
   if (typeof value !== 'string') return null;
   let phone = value.trim().replace(/[\s().-]/g, '');
@@ -182,7 +270,13 @@ const start = async () => {
     await pool.query('ALTER TABLE users ALTER COLUMN google_subject DROP NOT NULL');
     await pool.query('ALTER TABLE users ALTER COLUMN email DROP NOT NULL');
     await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS users_phone_number_unique ON users (phone_number)');
+    await pool.query(`CREATE TABLE IF NOT EXISTS telegram_chat_id_flows (
+      state TEXT PRIMARY KEY,
+      chat_id BIGINT,
+      expires_at TIMESTAMPTZ NOT NULL
+    )`);
   }
+  await configureTelegramWebhook();
   app.listen(port, '0.0.0.0', () => console.log(`NPS Computer server listening on ${port}`));
 };
 start().catch((error) => {
