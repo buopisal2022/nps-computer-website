@@ -9,6 +9,7 @@ const rateLimit = require('express-rate-limit');
 const session = require('express-session');
 const connectPgSimple = require('connect-pg-simple');
 const bcrypt = require('bcryptjs');
+const multer = require('multer');
 const { Pool } = require('pg');
 
 const app = express();
@@ -20,6 +21,7 @@ const allowedOrigins = new Set([
   'http://localhost:3000',
   'http://127.0.0.1:5500'
 ]);
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024, files: 1 } });
 const pool = databaseUrl ? new Pool({
   connectionString: databaseUrl,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
@@ -125,12 +127,28 @@ app.post('/api/telegram/webhook', async (req, res) => {
   const match = message && message.chat && message.chat.type === 'private' &&
     typeof message.text === 'string' &&
     message.text.match(/^\/start(?:@\w+)?\s+([A-Za-z0-9_-]{30,40})(?:\s|$)/);
+  if (message && message.chat?.type === 'private' && message.text?.trim() === '/stop') {
+    try {
+      await pool.query('DELETE FROM telegram_subscribers WHERE chat_id = $1', [String(message.chat.id)]);
+    } catch (error) {
+      console.error('Could not remove Telegram subscriber:', error.message);
+      return res.sendStatus(500);
+    }
+  }
   if (match) {
     try {
-      await pool.query(
-        'UPDATE telegram_chat_id_flows SET chat_id = $1 WHERE state = $2 AND expires_at > NOW() AND chat_id IS NULL',
+      const linked = await pool.query(
+        'UPDATE telegram_chat_id_flows SET chat_id = $1 WHERE state = $2 AND expires_at > NOW() AND chat_id IS NULL RETURNING state',
         [String(message.chat.id), match[1]]
       );
+      if (linked.rowCount) {
+        await pool.query(
+          `INSERT INTO telegram_subscribers (chat_id, username, first_name)
+           VALUES ($1, $2, $3) ON CONFLICT (chat_id) DO UPDATE
+           SET username = EXCLUDED.username, first_name = EXCLUDED.first_name, subscribed_at = NOW()`,
+          [String(message.chat.id), message.from?.username || null, message.from?.first_name || '']
+        );
+      }
     } catch (error) {
       console.error('Could not save Telegram chat ID flow:', error.message);
       return res.sendStatus(500);
@@ -244,11 +262,159 @@ app.post('/api/logout', (req, res) => {
     return error ? res.status(500).json({ error: 'Could not sign out.' }) : res.json({ ok: true });
   });
 });
+
+const adminLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false });
+function requireAdmin(req, res, next) {
+  if (req.session && req.session.adminId) return next();
+  return res.status(401).json({ error: 'សូមចូលគណនី Admin ជាមុនសិន។' });
+}
+app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
+  const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (!pool || !username || !password) return res.status(400).json({ error: 'សូមបញ្ចូលឈ្មោះ និងពាក្យសម្ងាត់។' });
+  try {
+    const result = await pool.query('SELECT id, username, password_hash FROM admins WHERE username = $1', [username]);
+    const admin = result.rows[0];
+    if (!admin || !await bcrypt.compare(password, admin.password_hash)) {
+      return res.status(401).json({ error: 'ឈ្មោះ Admin ឬពាក្យសម្ងាត់មិនត្រឹមត្រូវទេ។' });
+    }
+    req.session.regenerate((error) => {
+      if (error) return res.status(500).json({ error: 'មិនអាចចាប់ផ្ដើម session បានទេ។' });
+      req.session.adminId = String(admin.id);
+      req.session.save((saveError) => saveError
+        ? res.status(500).json({ error: 'មិនអាចរក្សាទុក session បានទេ។' })
+        : res.json({ admin: { username: admin.username } }));
+    });
+  } catch (error) {
+    console.error('Admin login failed:', error.message);
+    return res.status(503).json({ error: 'មិនអាចចូល Admin បានទេ។' });
+  }
+});
+app.get('/api/admin/me', requireAdmin, (req, res) => res.json({ admin: true }));
+app.post('/api/admin/logout', requireAdmin, (req, res) => {
+  req.session.destroy((error) => {
+    res.clearCookie('nps.sid', { httpOnly: true, secure: true, sameSite: 'none' });
+    return error ? res.status(500).json({ error: 'មិនអាចចាកចេញបានទេ។' }) : res.json({ ok: true });
+  });
+});
+app.get('/api/admin/posts', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, kind, title, body, media_id, created_at FROM posts ORDER BY created_at DESC LIMIT 50');
+    return res.json({ posts: result.rows });
+  } catch (error) { return res.status(503).json({ error: 'មិនអាចទាញយក post បានទេ។' }); }
+});
+app.get('/api/admin/subscribers.csv', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT chat_id, username, first_name, subscribed_at FROM telegram_subscribers ORDER BY subscribed_at DESC');
+    const cell = (value) => '"' + String(value ?? '').replace(/"/g, '""') + '"';
+    const csv = ['chat_id,username,first_name,subscribed_at', ...result.rows.map(row =>
+      [row.chat_id, row.username ? '@' + row.username : '', row.first_name, row.subscribed_at.toISOString()].map(cell).join(',')
+    )].join('\r\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="nps-telegram-subscribers.csv"');
+    return res.send('\uFEFF' + csv);
+  } catch (error) { return res.status(503).json({ error: 'មិនអាចនាំចេញ Chat ID បានទេ។' }); }
+});
+app.post('/api/admin/media', requireAdmin, (req, res, next) => {
+  upload.single('file')(req, res, (error) => error
+    ? res.status(400).json({ error: error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE' ? 'ឯកសារធំពេក។ អតិបរមា 25 MB។' : 'មិនអាចផ្ទុកឯកសារនេះបានទេ។' })
+    : next());
+}, async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'សូមជ្រើសរើសរូបភាព ឬវីដេអូ។' });
+  const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm']);
+  if (!allowed.has(req.file.mimetype)) return res.status(415).json({ error: 'អាចប្រើតែ JPG, PNG, WebP, GIF, MP4 ឬ WebM។' });
+  try {
+    const result = await pool.query(
+      'INSERT INTO media_assets (content_type, original_name, data, size_bytes) VALUES ($1, $2, $3, $4) RETURNING id',
+      [req.file.mimetype, req.file.originalname.slice(0, 180), req.file.buffer, req.file.size]
+    );
+    return res.status(201).json({ mediaId: String(result.rows[0].id), contentType: req.file.mimetype });
+  } catch (error) {
+    console.error('Media upload failed:', error.message);
+    return res.status(503).json({ error: 'មិនអាចរក្សាទុកឯកសារបានទេ។' });
+  }
+});
+app.get('/api/media/:id', async (req, res) => {
+  if (!/^\\d+$/.test(req.params.id)) return res.sendStatus(404);
+  try {
+    const result = await pool.query('SELECT content_type, data FROM media_assets WHERE id = $1', [req.params.id]);
+    if (!result.rowCount) return res.sendStatus(404);
+    res.setHeader('Content-Type', result.rows[0].content_type);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.send(result.rows[0].data);
+  } catch (error) { return res.sendStatus(503); }
+});
+app.get('/api/posts', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, kind, title, body, media_id, created_at FROM posts ORDER BY created_at DESC LIMIT 30');
+    return res.json({ posts: result.rows });
+  } catch (error) { return res.status(503).json({ error: 'មិនអាចទាញយក post បានទេ។' }); }
+});
+app.post('/api/admin/posts', requireAdmin, async (req, res) => {
+  const kind = req.body?.kind;
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  const body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+  const mediaId = req.body?.mediaId || null;
+  if (!['status', 'photo', 'video'].includes(kind) || !title || title.length > 160 || body.length > 4000) {
+    return res.status(400).json({ error: 'សូមពិនិត្យប្រភេទ post ចំណងជើង និងអត្ថបទ។' });
+  }
+  try {
+    if (kind !== 'status' && !mediaId) return res.status(400).json({ error: 'សូមបញ្ចូលឯកសារមុនបង្កើត post។' });
+    if (mediaId) {
+      const media = await pool.query('SELECT content_type FROM media_assets WHERE id = $1', [mediaId]);
+      if (!media.rowCount || (kind === 'photo' && !media.rows[0].content_type.startsWith('image/')) ||
+          (kind === 'video' && !media.rows[0].content_type.startsWith('video/'))) {
+        return res.status(400).json({ error: 'ប្រភេទឯកសារមិនត្រូវនឹង post ទេ។' });
+      }
+    }
+    const result = await pool.query(
+      'INSERT INTO posts (kind, title, body, media_id) VALUES ($1, $2, $3, $4) RETURNING id',
+      [kind, title, body, mediaId]
+    );
+    return res.status(201).json({ id: String(result.rows[0].id) });
+  } catch (error) {
+    console.error('Post creation failed:', error.message);
+    return res.status(503).json({ error: 'មិនអាចបង្កើត post បានទេ។' });
+  }
+});
+app.get('/api/sale-products', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, name, description, price, media_id, created_at FROM sale_products WHERE active = TRUE ORDER BY created_at DESC LIMIT 50');
+    return res.json({ products: result.rows });
+  } catch (error) { return res.status(503).json({ error: 'មិនអាចទាញយកផលិតផលបានទេ។' }); }
+});
+app.post('/api/admin/sale-products', requireAdmin, async (req, res) => {
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  const description = typeof req.body?.description === 'string' ? req.body.description.trim() : '';
+  const price = typeof req.body?.price === 'string' ? req.body.price.trim() : '';
+  const mediaId = req.body?.mediaId || null;
+  if (!name || name.length > 160 || description.length > 4000 || !price || price.length > 80) {
+    return res.status(400).json({ error: 'សូមបញ្ចូលឈ្មោះផលិតផល និងតម្លៃត្រឹមត្រូវ។' });
+  }
+  try {
+    if (mediaId) {
+      const media = await pool.query('SELECT content_type FROM media_assets WHERE id = $1', [mediaId]);
+      if (!media.rowCount || !media.rows[0].content_type.startsWith('image/')) {
+        return res.status(400).json({ error: 'រូបភាពផលិតផលមិនត្រឹមត្រូវទេ។' });
+      }
+    }
+    const result = await pool.query(
+      'INSERT INTO sale_products (name, description, price, media_id) VALUES ($1, $2, $3, $4) RETURNING id',
+      [name, description, price, mediaId]
+    );
+    return res.status(201).json({ id: String(result.rows[0].id) });
+  } catch (error) {
+    console.error('Sale product creation failed:', error.message);
+    return res.status(503).json({ error: 'មិនអាចបន្ថែមផលិតផលបានទេ។' });
+  }
+});
+
 app.use(express.static(__dirname));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
-  return res.status(500).json({ error: 'Unexpected server error.' });
+  const status = error instanceof multer.MulterError ? 400 : 500;
+  return res.status(status).json({ error: error instanceof multer.MulterError ? 'File upload failed.' : 'Unexpected server error.' });
 });
 
 const start = async () => {
@@ -270,6 +436,98 @@ const start = async () => {
     await pool.query('ALTER TABLE users ALTER COLUMN google_subject DROP NOT NULL');
     await pool.query('ALTER TABLE users ALTER COLUMN email DROP NOT NULL');
     await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS users_phone_number_unique ON users (phone_number)');
+    await pool.query(`CREATE TABLE IF NOT EXISTS admins (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    if (process.env.ADMIN_PASSWORD) {
+      const adminUsername = process.env.ADMIN_USERNAME || 'admin';
+      const adminPasswordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12);
+      await pool.query(
+        `INSERT INTO admins (username, password_hash) VALUES ($1, $2)
+         ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash`,
+        [adminUsername, adminPasswordHash]
+      );
+    }
+    await pool.query(`CREATE TABLE IF NOT EXISTS media_assets (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      content_type TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      data BYTEA NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS posts (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('status', 'photo', 'video')),
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      media_id BIGINT REFERENCES media_assets(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS sale_products (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      price TEXT NOT NULL,
+      media_id BIGINT REFERENCES media_assets(id),
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS telegram_subscribers (
+      chat_id BIGINT PRIMARY KEY,
+      username TEXT,
+      first_name TEXT NOT NULL DEFAULT '',
+      subscribed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS admins (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    if (process.env.ADMIN_PASSWORD) {
+      const adminUsername = process.env.ADMIN_USERNAME || 'admin';
+      const adminPasswordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12);
+      await pool.query(
+        `INSERT INTO admins (username, password_hash) VALUES ($1, $2)
+         ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash`,
+        [adminUsername, adminPasswordHash]
+      );
+    }
+    await pool.query(`CREATE TABLE IF NOT EXISTS media_assets (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      content_type TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      data BYTEA NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS posts (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('status', 'photo', 'video')),
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      media_id BIGINT REFERENCES media_assets(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS sale_products (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      price TEXT NOT NULL,
+      media_id BIGINT REFERENCES media_assets(id),
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS telegram_subscribers (
+      chat_id BIGINT PRIMARY KEY,
+      username TEXT,
+      first_name TEXT NOT NULL DEFAULT '',
+      subscribed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
     await pool.query(`CREATE TABLE IF NOT EXISTS telegram_chat_id_flows (
       state TEXT PRIMARY KEY,
       chat_id BIGINT,
