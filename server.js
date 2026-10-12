@@ -124,7 +124,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
   const message = req.body && req.body.message;
   const match = message && message.chat && message.chat.type === 'private' &&
     typeof message.text === 'string' &&
-    message.text.match(/^\/start(?:@\\w+)?\\s+([A-Za-z0-9_-]{30,40})(?:\\s|$)/);
+    message.text.match(/^\/start(?:@\w+)?\s+([A-Za-z0-9_-]{30,40})(?:\s|$)/);
   if (match) {
     try {
       await pool.query(
