@@ -335,7 +335,7 @@ app.post('/api/admin/media', requireAdmin, (req, res, next) => {
   }
 });
 app.get('/api/media/:id', async (req, res) => {
-  if (!/^\\d+$/.test(req.params.id)) return res.sendStatus(404);
+  if (!/^\d+$/.test(req.params.id)) return res.sendStatus(404);
   try {
     const result = await pool.query('SELECT content_type, data FROM media_assets WHERE id = $1', [req.params.id]);
     if (!result.rowCount) return res.sendStatus(404);
