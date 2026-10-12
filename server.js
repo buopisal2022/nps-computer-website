@@ -7,13 +7,12 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const session = require('express-session');
 const connectPgSimple = require('connect-pg-simple');
+const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
-const { OAuth2Client } = require('google-auth-library');
 
 const app = express();
 const port = Number(process.env.PORT || 10000);
 const databaseUrl = process.env.DATABASE_URL;
-const googleClientId = process.env.GOOGLE_CLIENT_ID || '';
 const sessionSecret = process.env.SESSION_SECRET;
 const allowedOrigins = new Set([
   'https://nps-computer-static.onrender.com',
@@ -27,7 +26,6 @@ const pool = databaseUrl ? new Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000
 }) : null;
-const googleClient = new OAuth2Client();
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -68,55 +66,87 @@ if (pool && sessionSecret) {
   });
 }
 
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false });
-app.get('/api/config', (req, res) => res.json({ googleClientId, authEnabled: Boolean(googleClientId && pool && sessionSecret) }));
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false });
+function normalizePhone(value) {
+  if (typeof value !== 'string') return null;
+  let phone = value.trim().replace(/[\s().-]/g, '');
+  if (phone.startsWith('00')) phone = '+' + phone.slice(2);
+  if (phone.startsWith('0')) phone = '+855' + phone.slice(1);
+  else if (/^855\d+$/.test(phone)) phone = '+' + phone;
+  if (!/^\+[1-9]\d{7,14}$/.test(phone)) return null;
+  return phone;
+}
+function publicUser(row) {
+  return { id: String(row.id), phone_number: row.phone_number, display_name: row.display_name };
+}
+function startSession(req, res, row) {
+  req.session.regenerate((error) => {
+    if (error) return res.status(500).json({ error: 'Could not start your session.' });
+    req.session.userId = String(row.id);
+    req.session.save((saveError) => {
+      if (saveError) return res.status(500).json({ error: 'Could not save your session.' });
+      return res.json({ user: publicUser(row) });
+    });
+  });
+}
+app.get('/api/config', (req, res) => res.json({ authEnabled: Boolean(pool && sessionSecret) }));
 app.get('/api/health', async (req, res) => {
   if (!pool) return res.status(503).json({ status: 'database_not_configured' });
   try { await pool.query('SELECT 1'); return res.json({ status: 'ok' }); }
   catch { return res.status(503).json({ status: 'database_unavailable' }); }
 });
-app.post('/api/auth/google', authLimiter, async (req, res) => {
-  if (!pool || !sessionSecret || !googleClientId) return res.status(503).json({ error: 'Google sign-in is not configured yet.' });
-  const credential = req.body && req.body.credential;
-  if (typeof credential !== 'string' || credential.length > 10000) return res.status(400).json({ error: 'Google credential is missing or invalid.' });
+app.post('/api/auth/register', authLimiter, async (req, res) => {
+  if (!pool || !sessionSecret) return res.status(503).json({ error: 'Authentication service is not configured yet.' });
+  const phone = normalizePhone(req.body && req.body.phone);
+  const password = req.body && req.body.password;
+  if (!phone) return res.status(400).json({ error: 'សូមបញ្ចូលលេខទូរស័ព្ទឲ្យបានត្រឹមត្រូវ។' });
+  if (typeof password !== 'string' || password.length < 8 || Buffer.byteLength(password, 'utf8') > 72) {
+    return res.status(400).json({ error: 'ពាក្យសម្ងាត់ត្រូវមានយ៉ាងតិច 8 តួអក្សរ។' });
+  }
   try {
-    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: googleClientId });
-    const payload = ticket.getPayload();
-    if (!payload || !payload.sub || !payload.email || payload.email_verified !== true) {
-      return res.status(401).json({ error: 'Please use a verified Google account.' });
-    }
+    const passwordHash = await bcrypt.hash(password, 12);
     const result = await pool.query(
-      `INSERT INTO users (google_subject, email, display_name, avatar_url, email_verified)
-       VALUES ($1, lower($2), $3, $4, TRUE)
-       ON CONFLICT (google_subject) DO UPDATE SET
-         email = EXCLUDED.email,
-         display_name = EXCLUDED.display_name,
-         avatar_url = EXCLUDED.avatar_url,
-         email_verified = TRUE,
-         updated_at = NOW()
-       RETURNING id, email, display_name, avatar_url`,
-      [payload.sub, payload.email, payload.name || payload.email, payload.picture || null]
+      `INSERT INTO users (phone_number, password_hash, display_name, email, google_subject, avatar_url, email_verified)
+       VALUES ($1, $2, $1, NULL, NULL, NULL, FALSE)
+       ON CONFLICT (phone_number) DO NOTHING
+       RETURNING id, phone_number, display_name`,
+      [phone, passwordHash]
     );
-    req.session.regenerate((sessionError) => {
-      if (sessionError) return res.status(500).json({ error: 'Could not start your session.' });
-      req.session.userId = String(result.rows[0].id);
-      req.session.save((saveError) => {
-        if (saveError) return res.status(500).json({ error: 'Could not save your session.' });
-        return res.json({ user: result.rows[0] });
-      });
-    });
+    if (!result.rowCount) return res.status(409).json({ error: 'លេខទូរស័ព្ទនេះមានគណនីរួចហើយ។ សូមចូលគណនី។' });
+    return startSession(req, res, result.rows[0]);
   } catch (error) {
-    console.error('Google sign-in failed:', error.message);
-    return res.status(401).json({ error: 'Google sign-in could not be verified.' });
+    console.error('Phone registration failed:', error.message);
+    return res.status(500).json({ error: 'មិនអាចបង្កើតគណនីបានទេ។ សូមព្យាយាមម្តងទៀត។' });
+  }
+});
+app.post('/api/auth/login', authLimiter, async (req, res) => {
+  if (!pool || !sessionSecret) return res.status(503).json({ error: 'Authentication service is not configured yet.' });
+  const phone = normalizePhone(req.body && req.body.phone);
+  const password = req.body && req.body.password;
+  if (!phone || typeof password !== 'string' || password.length > 72) {
+    return res.status(400).json({ error: 'សូមពិនិត្យលេខទូរស័ព្ទ និងពាក្យសម្ងាត់។' });
+  }
+  try {
+    const result = await pool.query(
+      'SELECT id, phone_number, display_name, password_hash FROM users WHERE phone_number = $1',
+      [phone]
+    );
+    const user = result.rows[0];
+    const matches = user && user.password_hash ? await bcrypt.compare(password, user.password_hash) : false;
+    if (!matches) return res.status(401).json({ error: 'លេខទូរស័ព្ទ ឬពាក្យសម្ងាត់មិនត្រឹមត្រូវទេ។' });
+    return startSession(req, res, user);
+  } catch (error) {
+    console.error('Phone login failed:', error.message);
+    return res.status(500).json({ error: 'មិនអាចចូលគណនីបានទេ។ សូមព្យាយាមម្តងទៀត។' });
   }
 });
 app.get('/api/me', async (req, res) => {
   if (!pool || !sessionSecret) return res.status(503).json({ error: 'Authentication service is not configured yet.' });
   if (!req.session || !req.session.userId) return res.json({ user: null });
   try {
-    const result = await pool.query('SELECT id, email, display_name, avatar_url FROM users WHERE id = $1', [req.session.userId]);
+    const result = await pool.query('SELECT id, phone_number, display_name FROM users WHERE id = $1', [req.session.userId]);
     if (!result.rowCount) return res.json({ user: null });
-    return res.json({ user: result.rows[0] });
+    return res.json({ user: publicUser(result.rows[0]) });
   } catch { return res.status(503).json({ error: 'Could not load your account.' }); }
 });
 app.post('/api/logout', (req, res) => {
@@ -137,14 +167,21 @@ const start = async () => {
   if (pool) {
     await pool.query(`CREATE TABLE IF NOT EXISTS users (
       id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      google_subject TEXT NOT NULL UNIQUE,
-      email TEXT NOT NULL UNIQUE,
+      google_subject TEXT UNIQUE,
+      email TEXT UNIQUE,
+      phone_number TEXT UNIQUE,
+      password_hash TEXT,
       display_name TEXT NOT NULL,
       avatar_url TEXT,
       email_verified BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number TEXT');
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT');
+    await pool.query('ALTER TABLE users ALTER COLUMN google_subject DROP NOT NULL');
+    await pool.query('ALTER TABLE users ALTER COLUMN email DROP NOT NULL');
+    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS users_phone_number_unique ON users (phone_number)');
   }
   app.listen(port, '0.0.0.0', () => console.log(`NPS Computer server listening on ${port}`));
 };
