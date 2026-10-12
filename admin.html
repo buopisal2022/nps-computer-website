@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="km">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07111f">
+  <title>Admin | NPS Computer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800&family=Kantumruy+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root{--bg:#07111f;--panel:#0e1b2c;--line:#ffffff17;--text:#f4f7fc;--muted:#9aabc1;--cyan:#83e7ee;--font:'Kantumruy Pro','DM Sans',sans-serif}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);line-height:1.6}.wrap{width:min(1000px,calc(100% - 32px));margin:auto}.top{padding:22px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}.top b{font:800 18px 'DM Sans',sans-serif}.top a{color:var(--cyan);font-size:13px}.page{padding:36px 0 70px}.panel{background:linear-gradient(145deg,#10243a,#081421);border:1px solid var(--line);border-radius:16px;padding:24px;margin:18px 0}.panel h1,.panel h2{margin:0 0 8px}.panel p,.muted{color:var(--muted);font-size:13px}.login{max-width:420px;margin:40px auto}.form{display:grid;gap:10px}.form label{font-size:12px;color:#c8d8e8;font-weight:700}.form input,.form textarea,.form select{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:9px;background:#081421;color:white;font:inherit}.form textarea{min-height:90px;resize:vertical}.form input:focus,.form textarea:focus,.form select:focus{outline:1px solid var(--cyan)}.btn{border:0;border-radius:9px;padding:11px 16px;background:linear-gradient(110deg,#5cc6ed,#72c4ff);color:#06111e;font:800 13px var(--font);cursor:pointer}.btn.secondary{background:#142840;color:#eaf5ff;border:1px solid var(--line)}.actions{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.message{min-height:20px;color:var(--cyan);font-size:12px}.message.error{color:#ff9c9c}.items{display:grid;gap:8px}.item{padding:11px 12px;border:1px solid var(--line);border-radius:9px;background:#091827;font-size:13px}.item small{display:block;color:var(--muted)}[hidden]{display:none!important}.hint{font-size:11px;color:var(--muted)}@media(max-width:650px){.grid{grid-template-columns:1fr}.panel{padding:18px}.page{padding-top:18px}}
+  </style>
+</head>
+<body>
+<header class="wrap top"><b>NPS COMPUTER · ADMIN</b><a href="/">← ទៅកាន់គេហទំព័រ</a></header>
+<main class="wrap page">
+  <section class="panel login" id="loginPanel">
+    <h1>ចូល Admin</h1><p>ប្រើគណនីគ្រប់គ្រង NPS Computer។</p>
+    <form class="form" id="loginForm">
+      <label for="username">ឈ្មោះអ្នកប្រើ</label><input id="username" name="username" autocomplete="username" value="admin" required>
+      <label for="password">ពាក្យសម្ងាត់</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button class="btn" type="submit">ចូលគណនី</button><div class="message" id="loginMessage" aria-live="polite"></div>
+    </form>
+  </section>
+  <section id="dashboard" hidden>
+    <div class="panel"><h1>ផ្ទាំងគ្រប់គ្រង</h1><p>បង្ហោះស្ថានភាព រូបភាព វីដេអូ និងផលិតផលបញ្ចុះតម្លៃ។ ឯកសារមេឌៀរក្សាទុកក្នុង PostgreSQL; ទំហំអតិបរមា 25 MB ក្នុងមួយឯកសារ។</p>
+      <div class="actions"><button class="btn secondary" type="button" id="exportSubscribers">នាំចេញ Telegram Chat IDs (CSV)</button><button class="btn secondary" type="button" id="logoutButton">ចាកចេញ</button></div>
+      <div class="message" id="dashboardMessage" aria-live="polite"></div>
+    </div>
+    <div class="grid">
+      <section class="panel"><h2>បង្ហោះ Post</h2><p>ស្ថានភាព ឬ post រូបភាព/វីដេអូ។</p>
+        <form class="form" id="postForm">
+          <label for="postKind">ប្រភេទ Post</label><select id="postKind" name="kind"><option value="status">ស្ថានភាព</option><option value="photo">រូបភាព</option><option value="video">វីដេអូ</option></select>
+          <label for="postTitle">ចំណងជើង</label><input id="postTitle" name="title" maxlength="160" required>
+          <label for="postBody">អត្ថបទ</label><textarea id="postBody" name="body" maxlength="4000"></textarea>
+          <div id="postFileWrap" hidden><label for="postFile">ឯកសារ (25 MB អតិបរមា)</label><input id="postFile" name="file" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm"></div>
+          <button class="btn" type="submit">បង្ហោះ Post</button><div class="message" id="postMessage" aria-live="polite"></div>
+        </form>
+      </section>
+      <section class="panel"><h2>ដាក់លក់ផលិតផល</h2><p>បន្ថែមផលិតផលថ្មីទៅផ្នែកពិសេសលើគេហទំព័រ។</p>
+        <form class="form" id="productForm">
+          <label for="productName">ឈ្មោះផលិតផល</label><input id="productName" name="name" maxlength="160" required>
+          <label for="productPrice">តម្លៃ (ឧ. $499 ឬ សួរតម្លៃ)</label><input id="productPrice" name="price" maxlength="80" required>
+          <label for="productDescription">ព័ត៌មានផលិតផល</label><textarea id="productDescription" name="description" maxlength="4000"></textarea>
+          <label for="productImage">រូបភាព (ជាជម្រើស, JPG/PNG/WebP/GIF, 25 MB អតិបរមា)</label><input id="productImage" name="file" type="file" accept="image/jpeg,image/png,image/webp,image/gif">
+          <button class="btn" type="submit">បន្ថែមផលិតផល</button><div class="message" id="productMessage" aria-live="polite"></div>
+        </form>
+      </section>
+    </div>
+    <div class="grid">
+      <section class="panel"><h2>Post ថ្មីៗ</h2><div class="items" id="recentPosts"></div></section>
+      <section class="panel"><h2>ផលិតផលកំពុងដាក់លក់</h2><div class="items" id="recentProducts"></div></section>
+    </div>
+    <p class="hint">អ្នកដែលចុច Start តាមប៊ូតុង Subscribe ក្នុងគេហទំព័រនឹងត្រូវបានរក្សាទុកជា Telegram subscriber។ អ្នកអាចផ្ញើ /stop ទៅ bot ដើម្បីដកខ្លួនចេញ។</p>
+  </section>
+</main>
+<script>
+  const API='https://nps-computer-auth.onrender.com';
+  const loginPanel=document.getElementById('loginPanel'),dashboard=document.getElementById('dashboard');
+  function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
+  async function api(path,options={}){const response=await fetch(API+path,{credentials:'include',...options});const data=response.headers.get('content-type')?.includes('application/json')?await response.json():null;if(!response.ok)throw new Error(data?.error||'សំណើមិនបានជោគជ័យ។');return data;}
+  function setMessage(id,text,error=false){const el=document.getElementById(id);el.textContent=text;el.classList.toggle('error',error);}
+  function setLoggedIn(value){loginPanel.hidden=value;dashboard.hidden=!value;if(value)loadAdminData();}
+  async function checkSession(){try{await api('/api/admin/me');setLoggedIn(true);}catch{setLoggedIn(false);}}
+  document.getElementById('loginForm').addEventListener('submit',async event=>{event.preventDefault();setMessage('loginMessage','កំពុងចូល...');const form=new FormData(event.currentTarget);try{await api('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:form.get('username'),password:form.get('password')})});document.getElementById('password').value='';setMessage('loginMessage','');setLoggedIn(true);}catch(error){setMessage('loginMessage',error.message,true);}});
+  document.getElementById('logoutButton').addEventListener('click',async()=>{try{await api('/api/admin/logout',{method:'POST'});}finally{setLoggedIn(false);}});
+  document.getElementById('exportSubscribers').addEventListener('click',async()=>{setMessage('dashboardMessage','កំពុងនាំចេញ...');try{const response=await fetch(API+'/api/admin/subscribers.csv',{credentials:'include'});if(!response.ok){const data=await response.json();throw new Error(data.error||'នាំចេញមិនបានទេ។');}const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='nps-telegram-subscribers.csv';a.click();URL.revokeObjectURL(url);setMessage('dashboardMessage','បាននាំចេញ CSV រួចរាល់។');}catch(error){setMessage('dashboardMessage',error.message,true);}});
+  async function uploadFile(file){if(!file)return null;const form=new FormData();form.append('file',file);const data=await api('/api/admin/media',{method:'POST',body:form});return data.mediaId;}
+  document.getElementById('postKind').addEventListener('change',event=>{const kind=event.target.value,wrap=document.getElementById('postFileWrap'),file=document.getElementById('postFile');wrap.hidden=kind==='status';file.required=kind!=='status';file.accept=kind==='photo'?'image/jpeg,image/png,image/webp,image/gif':'video/mp4,video/webm';});
+  document.getElementById('postForm').addEventListener('submit',async event=>{event.preventDefault();setMessage('postMessage','កំពុងបង្ហោះ...');const form=new FormData(event.currentTarget);try{const kind=form.get('kind'),mediaId=kind==='status'?null:await uploadFile(form.get('file'));await api('/api/admin/posts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,title:form.get('title'),body:form.get('body'),mediaId})});event.currentTarget.reset();document.getElementById('postKind').dispatchEvent(new Event('change'));setMessage('postMessage','បានបង្ហោះ Post រួចរាល់។');loadAdminData();}catch(error){setMessage('postMessage',error.message,true);}});
+  document.getElementById('productForm').addEventListener('submit',async event=>{event.preventDefault();setMessage('productMessage','កំពុងរក្សាទុក...');const form=new FormData(event.currentTarget);try{const mediaId=await uploadFile(form.get('file'));await api('/api/admin/sale-products',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:form.get('name'),price:form.get('price'),description:form.get('description'),mediaId})});event.currentTarget.reset();setMessage('productMessage','បានបន្ថែមផលិតផលរួចរាល់។');loadAdminData();}catch(error){setMessage('productMessage',error.message,true);}});
+  async function loadAdminData(){try{const [posts,sales]=await Promise.all([api('/api/admin/posts'),api('/api/sale-products')]);document.getElementById('recentPosts').innerHTML=posts.posts.length?posts.posts.map(item=>'<div class="item">'+escapeHtml(item.title)+'<small>'+escapeHtml(item.kind)+' · '+new Date(item.created_at).toLocaleString('km-KH')+'</small></div>').join(''):'<div class="muted">មិនទាន់មាន Post ទេ។</div>';document.getElementById('recentProducts').innerHTML=sales.products.length?sales.products.map(item=>'<div class="item">'+escapeHtml(item.name)+'<small>'+escapeHtml(item.price)+'</small></div>').join(''):'<div class="muted">មិនទាន់មានផលិតផលទេ។</div>';}catch(error){setMessage('dashboardMessage',error.message,true);}}
+  checkSession();
+</script>
+</body>
+</html>
